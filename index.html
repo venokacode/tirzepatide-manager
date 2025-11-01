@@ -3,60 +3,55 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tirzepatide 注射管理系统</title>
+    <title>Tirzepatide 注射管理助手</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        @keyframes pulse-soft {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
+        .fade-in {
+            animation: fade-in 0.4s ease-out;
         }
-        .pulse-soft {
-            animation: pulse-soft 2s ease-in-out infinite;
+        @keyframes fade-in {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
         }
-        .body-part {
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-        .body-part:hover {
-            opacity: 0.7;
-        }
-        .body-part.selected {
-            fill: #10b981;
-            stroke: #059669;
-            stroke-width: 3;
-        }
-        .body-part.used {
-            fill: #fbbf24;
-            opacity: 0.6;
+        .timeline::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: linear-gradient(to bottom, #93c5fd, #34d399);
+            left: 1rem;
         }
     </style>
 </head>
-<body class="bg-gradient-to-br from-blue-50 to-green-50 min-h-screen">
-    <div id="app" class="container mx-auto px-4 py-8 max-w-6xl"></div>
+<body class="bg-slate-100 text-slate-900">
+    <div class="min-h-screen">
+        <header class="bg-white shadow-sm">
+            <div class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+                <div>
+                    <h1 class="text-2xl font-semibold text-slate-800">Tirzepatide 注射管理助手</h1>
+                    <p class="text-sm text-slate-500">记录、提醒与注射位点轮换，一站式完成</p>
+                </div>
+                <button id="resetButton" class="rounded-lg border border-rose-200 px-3 py-2 text-sm text-rose-500 transition hover:border-rose-300 hover:bg-rose-50">
+                    清空数据
+                </button>
+            </div>
+        </header>
+        <main class="mx-auto max-w-6xl px-4 py-8" id="app"></main>
+    </div>
 
     <script>
-        // 数据管理
-        const Storage = {
-            save(key, data) {
-                localStorage.setItem(key, JSON.stringify(data));
-            },
-            load(key) {
-                const data = localStorage.getItem(key);
-                return data ? JSON.parse(data) : null;
-            },
-            clear(key) {
-                localStorage.removeItem(key);
-            }
-        };
-
-        // 应用状态
-        let appState = Storage.load('tirzepatide_data') || {
+        const STORAGE_KEY = 'tirzepatide_manager_v2';
+        const clone = value => (typeof structuredClone === 'function'
+            ? structuredClone(value)
+            : JSON.parse(JSON.stringify(value)));
+        const DEFAULT_STATE = {
             initialized: false,
-            currentDose: null,
-            doseCount: 0, // 当前剂量已打次数 (0-4)
-            injectionDay: null, // 每周注射日 (0-6)
-            lastInjection: null,
-            nextInjection: null,
+            currentDose: '',
+            injectionDay: '',
+            startDate: '',
+            lastInjection: '',
+            nextInjection: '',
             injectionHistory: [],
             injectionSites: {
                 abdomen: [],
@@ -64,1234 +59,876 @@
                 upperArm: []
             },
             contacts: [],
-            notifications: {
+            reminders: {
                 browser: true,
                 email: false
+            },
+            quality: {
+                tests: [],
+                reviews: []
             }
         };
 
-        // 保存状态
-        function saveState() {
-            Storage.save('tirzepatide_data', appState);
-            render();
+        const App = {
+            state: loadState(),
+            save() {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
+            },
+            update(mutator) {
+                mutator(this.state);
+                this.save();
+                render();
+            },
+            reset() {
+                localStorage.removeItem(STORAGE_KEY);
+                this.state = clone(DEFAULT_STATE);
+                render();
+            }
+        };
+
+        function loadState() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) return clone(DEFAULT_STATE);
+                const parsed = JSON.parse(raw);
+                return normalizeState(parsed);
+            } catch (error) {
+                console.warn('读取本地数据失败，已回退为默认值', error);
+                return clone(DEFAULT_STATE);
+            }
         }
 
-        // 日期工具
-        function formatDate(date) {
-            if (!date) return '';
-            const d = new Date(date);
-            return d.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
+        function normalizeState(value) {
+            const base = clone(DEFAULT_STATE);
+            if (!value || typeof value !== 'object') {
+                return base;
+            }
+
+            const directKeys = ['initialized', 'currentDose', 'injectionDay', 'startDate', 'lastInjection', 'nextInjection'];
+            directKeys.forEach(key => {
+                if (key in value) {
+                    base[key] = value[key];
+                }
+            });
+
+            base.reminders = Object.assign({}, DEFAULT_STATE.reminders, isPlainObject(value.reminders) ? value.reminders : {});
+            base.contacts = Array.isArray(value.contacts)
+                ? value.contacts.filter(isValidContact).map(contact => ({
+                    name: contact.name,
+                    phone: contact.phone,
+                    note: contact.note || ''
+                }))
+                : [];
+            base.injectionSites = Object.assign({}, DEFAULT_STATE.injectionSites, isPlainObject(value.injectionSites) ? value.injectionSites : {});
+            base.injectionHistory = Array.isArray(value.injectionHistory)
+                ? value.injectionHistory.map(normalizeHistoryEntry).filter(Boolean)
+                : [];
+            base.quality = normalizeQuality(value.quality);
+
+            return base;
         }
 
-        function getWeekdayName(day) {
-            const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-            return days[day];
+        function normalizeHistoryEntry(entry) {
+            if (!entry || typeof entry !== 'object') return null;
+            if (!entry.date || !entry.site) return null;
+            return {
+                date: entry.date,
+                site: entry.site,
+                note: entry.note || '',
+                recordedAt: entry.recordedAt || entry.date
+            };
         }
 
-        function calculateNextInjection(lastDate, weekday) {
-            const last = new Date(lastDate);
-            const next = new Date(last);
-            next.setDate(next.getDate() + 7);
-            return next.toISOString();
+        function normalizeQuality(value) {
+            const base = clone(DEFAULT_STATE.quality);
+            if (!isPlainObject(value)) {
+                return base;
+            }
+
+            if (Array.isArray(value.tests)) {
+                base.tests = value.tests.filter(isValidTest).map(item => ({
+                    name: item.name,
+                    date: item.date,
+                    result: item.result,
+                    note: item.note || ''
+                }));
+            }
+
+            if (Array.isArray(value.reviews)) {
+                base.reviews = value.reviews.filter(isValidReview).map(item => ({
+                    reviewer: item.reviewer,
+                    date: item.date,
+                    status: item.status,
+                    note: item.note || ''
+                }));
+            }
+
+            return base;
         }
 
-        function getDaysSince(date) {
-            if (!date) return 0;
+        function isPlainObject(value) {
+            return value !== null && typeof value === 'object' && !Array.isArray(value);
+        }
+
+        function isValidContact(contact) {
+            return contact && hasText(contact.name) && hasText(contact.phone);
+        }
+
+        function isValidTest(test) {
+            return test && hasText(test.name) && hasText(test.date) && hasText(test.result);
+        }
+
+        function isValidReview(review) {
+            return review && hasText(review.reviewer) && hasText(review.date) && hasText(review.status);
+        }
+
+        function hasText(value) {
+            return typeof value === 'string' && value.trim() !== '';
+        }
+
+        function formatDate(value) {
+            if (!value) return '';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return '';
+            return date.toLocaleDateString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit'
+            });
+        }
+
+        function weekdayName(day) {
+            const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+            return names[Number(day)] ?? '';
+        }
+
+        function nextWeek(dateString) {
+            if (!dateString) return '';
+            const date = new Date(dateString);
+            if (Number.isNaN(date.getTime())) return '';
+            date.setDate(date.getDate() + 7);
+            return date.toISOString();
+        }
+
+        function daysSince(dateString) {
+            if (!dateString) return '';
+            const date = new Date(dateString);
+            if (Number.isNaN(date.getTime())) return '';
             const now = new Date();
-            const then = new Date(date);
-            return Math.floor((now - then) / (1000 * 60 * 60 * 24));
+            const diff = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+            return diff >= 0 ? diff : '';
         }
 
-        // 请求通知权限
-        function requestNotificationPermission() {
-            if ('Notification' in window && Notification.permission === 'default') {
+        function ensureNotificationPermission() {
+            if (!('Notification' in window)) return;
+            if (Notification.permission === 'default') {
                 Notification.requestPermission();
             }
         }
 
-        // 发送浏览器通知
         function sendNotification(title, body) {
-            if ('Notification' in window && Notification.permission === 'granted') {
-                new Notification(title, {
-                    body: body,
-                    icon: '💉',
-                    badge: '💉'
+            if (!('Notification' in window)) return;
+            if (Notification.permission === 'granted') {
+                new Notification(title, { body, icon: '💉' });
+            }
+        }
+
+        function render() {
+            const container = document.getElementById('app');
+            if (!container) return;
+
+            container.innerHTML = App.state.initialized
+                ? renderDashboard()
+                : renderSetup();
+
+            if (App.state.initialized) {
+                bindDashboardEvents();
+                evaluateReminders();
+            } else {
+                bindSetupEvents();
+            }
+        }
+
+        function renderSetup() {
+            return `
+                <section class="fade-in rounded-2xl bg-white p-8 shadow-sm">
+                    <h2 class="text-xl font-semibold text-slate-800">首次使用设置</h2>
+                    <p class="mt-2 text-sm text-slate-500">填写当前处方剂量与注射时间，我们会帮你记录下一次注射日期。</p>
+                    <form id="setupForm" class="mt-6 grid gap-6 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm">
+                            <span class="font-medium text-slate-700">当前处方剂量</span>
+                            <select name="dose" required class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none">
+                                <option value="">请选择剂量</option>
+                                <option value="2.5mg">2.5 mg</option>
+                                <option value="5mg">5 mg</option>
+                                <option value="7.5mg">7.5 mg</option>
+                                <option value="10mg">10 mg</option>
+                                <option value="12.5mg">12.5 mg</option>
+                                <option value="15mg">15 mg</option>
+                            </select>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm">
+                            <span class="font-medium text-slate-700">每周计划注射日</span>
+                            <select name="weekday" required class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none">
+                                <option value="">请选择星期</option>
+                                <option value="1">周一</option>
+                                <option value="2">周二</option>
+                                <option value="3">周三</option>
+                                <option value="4">周四</option>
+                                <option value="5">周五</option>
+                                <option value="6">周六</option>
+                                <option value="0">周日</option>
+                            </select>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm">
+                            <span class="font-medium text-slate-700">最近一次注射日期</span>
+                            <input type="date" name="last" required class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm">
+                            <span class="font-medium text-slate-700">是否开启浏览器提醒</span>
+                            <select name="notify" class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none">
+                                <option value="yes">开启</option>
+                                <option value="no">关闭</option>
+                            </select>
+                        </label>
+                        <div class="md:col-span-2">
+                            <button type="submit" class="w-full rounded-xl bg-blue-600 py-3 text-white transition hover:bg-blue-500">完成并保存</button>
+                        </div>
+                    </form>
+                </section>
+            `;
+        }
+
+        function renderDashboard() {
+            const { currentDose, injectionDay, lastInjection, nextInjection, injectionHistory, reminders, quality } = App.state;
+            const nextDate = formatDate(nextInjection);
+            const lastDate = formatDate(lastInjection);
+            const dayDiff = daysSince(lastInjection);
+
+            return `
+                <div class="fade-in grid gap-6 lg:grid-cols-[2fr,1fr]">
+                    <section class="rounded-2xl bg-white p-6 shadow-sm">
+                        <h2 class="text-lg font-semibold text-slate-800">注射概览</h2>
+                        <div class="mt-4 grid gap-4 md:grid-cols-3">
+                            <article class="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                                <p class="text-xs font-medium uppercase tracking-wide text-slate-500">当前剂量</p>
+                                <p class="mt-2 text-2xl font-semibold text-slate-800">${currentDose || '未设置'}</p>
+                                <p class="text-xs text-slate-400">计划注射日：${weekdayName(injectionDay) || '-'}</p>
+                            </article>
+                            <article class="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                                <p class="text-xs font-medium uppercase tracking-wide text-slate-500">下一次注射</p>
+                                <p class="mt-2 text-2xl font-semibold text-slate-800">${nextDate || '待安排'}</p>
+                                <p class="text-xs text-slate-400">我们会在前一天提醒你</p>
+                            </article>
+                            <article class="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                                <p class="text-xs font-medium uppercase tracking-wide text-slate-500">距离上次注射</p>
+                                <p class="mt-2 text-2xl font-semibold text-slate-800">${dayDiff !== '' ? `${dayDiff} 天` : '未记录'}</p>
+                                <p class="text-xs text-slate-400">上次注射：${lastDate || '-'}</p>
+                            </article>
+                        </div>
+                        <div class="mt-6 rounded-xl border border-dashed border-blue-200 bg-blue-50 p-4 text-sm text-blue-700">
+                            提示：保持注射位点轮换，避免在同一部位连续注射超过 4 次。
+                        </div>
+                    </section>
+
+                    <section class="rounded-2xl bg-white p-6 shadow-sm">
+                        <h2 class="text-lg font-semibold text-slate-800">提醒设置</h2>
+                        <form id="reminderForm" class="mt-4 space-y-4 text-sm">
+                            <label class="flex items-center justify-between gap-2">
+                                <div>
+                                    <p class="font-medium text-slate-700">浏览器通知</p>
+                                    <p class="text-xs text-slate-400">在注射前 24 小时和 1 小时提醒</p>
+                                </div>
+                                <input type="checkbox" name="browser" ${reminders.browser ? 'checked' : ''} class="h-4 w-4">
+                            </label>
+                            <label class="flex items-center justify-between gap-2">
+                                <div>
+                                    <p class="font-medium text-slate-700">邮件通知（暂存）</p>
+                                    <p class="text-xs text-slate-400">我们会在将来支持发送邮件提醒</p>
+                                </div>
+                                <input type="checkbox" name="email" ${reminders.email ? 'checked' : ''} class="h-4 w-4">
+                            </label>
+                            <p class="text-xs text-slate-400">温馨提示：保存设置后请保持浏览器允许通知权限。</p>
+                            <button type="submit" class="w-full rounded-lg bg-blue-600 py-2 text-sm font-medium text-white transition hover:bg-blue-500">保存提醒设置</button>
+                        </form>
+                    </section>
+
+                    <section class="rounded-2xl bg-white p-6 shadow-sm lg:col-span-2">
+                        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <h2 class="text-lg font-semibold text-slate-800">记录注射</h2>
+                                <p class="text-sm text-slate-500">选择注射日期和部位，我们会自动安排下一次日期。</p>
+                            </div>
+                            <button id="toggleRecord" class="rounded-lg border border-blue-200 px-4 py-2 text-sm text-blue-600 transition hover:border-blue-300 hover:bg-blue-50">展开/收起表单</button>
+                        </div>
+                        <form id="recordForm" class="mt-4 grid gap-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                            <label class="flex flex-col gap-2 text-sm">
+                                <span class="font-medium text-slate-700">注射日期</span>
+                                <input type="date" name="date" value="${new Date().toISOString().slice(0,10)}" required class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none">
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm">
+                                <span class="font-medium text-slate-700">注射部位</span>
+                                <select name="site" required class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none">
+                                    <option value="">请选择部位</option>
+                                    <option value="abdomen">腹部</option>
+                                    <option value="thigh">大腿</option>
+                                    <option value="upperArm">上臂</option>
+                                </select>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm">
+                                <span class="font-medium text-slate-700">备注（可选）</span>
+                                <textarea name="note" rows="2" class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none" placeholder="例如：左侧腹部，轻微发红"></textarea>
+                            </label>
+                            <button type="submit" class="rounded-lg bg-emerald-600 py-2 text-sm font-medium text-white transition hover:bg-emerald-500">保存记录</button>
+                        </form>
+                        <div class="mt-6 grid gap-6 md:grid-cols-2">
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-700">注射位点速览</h3>
+                                <div class="mt-3 flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4">
+                                    ${renderSiteSummary('abdomen', '腹部')}
+                                    ${renderSiteSummary('thigh', '大腿')}
+                                    ${renderSiteSummary('upperArm', '上臂')}
+                                </div>
+                            </div>
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-700">注射位点示意</h3>
+                                <div class="mt-3 flex justify-center rounded-xl border border-slate-200 bg-white p-4">
+                                    ${renderSiteSvg()}
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="rounded-2xl bg-white p-6 shadow-sm lg:col-span-2">
+                        <h2 class="text-lg font-semibold text-slate-800">注射历史</h2>
+                        ${injectionHistory.length === 0 ? `
+                            <p class="mt-4 text-sm text-slate-500">还没有注射记录，快来记录第一次吧！</p>
+                        ` : `
+                            <div class="relative mt-6 timeline">
+                                <ul class="space-y-6 pl-12">
+                                    ${injectionHistory.slice().reverse().map((item, index) => `
+                                        <li class="relative rounded-xl border border-slate-100 bg-slate-50 p-4 shadow-sm">
+                                            <div class="absolute left-[-3.35rem] top-5 h-3 w-3 rounded-full bg-blue-500"></div>
+                                            <div class="flex flex-col gap-1 text-sm">
+                                                <p class="text-slate-800">${formatDate(item.date)} · ${siteName(item.site)}</p>
+                                                ${item.note ? `<p class="text-slate-500">${item.note}</p>` : ''}
+                                                <p class="text-xs text-slate-400">记录时间：${formatDate(item.recordedAt)}</p>
+                                            </div>
+                                        </li>
+                                    `).join('')}
+                                </ul>
+                            </div>
+                        `}
+                    </section>
+
+                    <section class="rounded-2xl bg-white p-6 shadow-sm lg:col-span-2">
+                        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <h2 class="text-lg font-semibold text-slate-800">紧急联系人</h2>
+                                <p class="text-sm text-slate-500">保存医生或药师的联系方式，出现问题随时联系。</p>
+                            </div>
+                            <button id="toggleContact" class="rounded-lg border border-blue-200 px-4 py-2 text-sm text-blue-600 transition hover:border-blue-300 hover:bg-blue-50">新增联系人</button>
+                        </div>
+                        <form id="contactForm" class="mt-4 hidden grid gap-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                            <label class="flex flex-col gap-2 text-sm">
+                                <span class="font-medium text-slate-700">姓名</span>
+                                <input type="text" name="name" required class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none">
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm">
+                                <span class="font-medium text-slate-700">联系方式</span>
+                                <input type="text" name="phone" required class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none">
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm">
+                                <span class="font-medium text-slate-700">备注（可选）</span>
+                                <textarea name="note" rows="2" class="rounded-lg border border-slate-200 px-3 py-2 focus:border-blue-400 focus:outline-none"></textarea>
+                            </label>
+                            <button type="submit" class="rounded-lg bg-blue-600 py-2 text-sm font-medium text-white transition hover:bg-blue-500">保存联系人</button>
+                        </form>
+                        <ul class="mt-6 grid gap-4 md:grid-cols-2">
+                            ${App.state.contacts.length === 0 ? '<li class="text-sm text-slate-500">暂无联系人记录</li>' : App.state.contacts.map((contact, idx) => `
+                                <li class="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                                    <div class="flex items-start justify-between gap-3">
+                                        <div>
+                                            <p class="text-base font-medium text-slate-800">${contact.name}</p>
+                                            <p class="text-sm text-slate-500">${contact.phone}</p>
+                                            ${contact.note ? `<p class="mt-2 text-xs text-slate-400">${contact.note}</p>` : ''}
+                                        </div>
+                                        <button data-index="${idx}" class="delete-contact text-xs text-rose-500">删除</button>
+                                    </div>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    </section>
+
+                    <section class="rounded-2xl bg-white p-6 shadow-sm lg:col-span-2">
+                        <h2 class="text-lg font-semibold text-slate-800">数据工具</h2>
+                        <div class="mt-4 flex flex-col gap-3 text-sm md:flex-row">
+                            <button id="exportButton" class="flex-1 rounded-lg border border-slate-200 px-4 py-2 text-slate-700 transition hover:border-slate-300 hover:bg-slate-50">导出全部数据 (JSON)</button>
+                            <button id="copySummary" class="flex-1 rounded-lg border border-slate-200 px-4 py-2 text-slate-700 transition hover:border-slate-300 hover:bg-slate-50">复制最近 4 次注射摘要</button>
+                        </div>
+                        <p class="mt-3 text-xs text-slate-400">导出数据可用于备份或与医疗团队共享。</p>
+                    </section>
+
+                    ${renderQualitySection(quality)}
+                </div>
+            `;
+        }
+
+        function renderQualitySection(quality) {
+            const tests = quality?.tests ?? [];
+            const reviews = quality?.reviews ?? [];
+            return `
+                <section class="rounded-2xl bg-white p-6 shadow-sm lg:col-span-2">
+                    <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-lg font-semibold text-slate-800">测试与代码审查</h2>
+                            <p class="text-sm text-slate-500">记录每次测试结果与代码审查状态，确保改动通过质量把关。</p>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <button id="toggleTestForm" class="rounded-lg border border-emerald-200 px-4 py-2 text-sm text-emerald-600 transition hover:border-emerald-300 hover:bg-emerald-50">记录测试</button>
+                            <button id="toggleReviewForm" class="rounded-lg border border-indigo-200 px-4 py-2 text-sm text-indigo-600 transition hover:border-indigo-300 hover:bg-indigo-50">新增代码审查</button>
+                        </div>
+                    </div>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <form id="testForm" class="hidden grid gap-3 rounded-xl border border-emerald-100 bg-emerald-50 p-4 text-sm">
+                            <label class="flex flex-col gap-1">
+                                <span class="font-medium text-emerald-700">测试名称</span>
+                                <input type="text" name="name" required class="rounded-lg border border-emerald-200 px-3 py-2 focus:border-emerald-400 focus:outline-none" placeholder="例如：核心流程冒烟测试">
+                            </label>
+                            <label class="flex flex-col gap-1">
+                                <span class="font-medium text-emerald-700">执行日期</span>
+                                <input type="date" name="date" value="${new Date().toISOString().slice(0,10)}" required class="rounded-lg border border-emerald-200 px-3 py-2 focus:border-emerald-400 focus:outline-none">
+                            </label>
+                            <label class="flex flex-col gap-1">
+                                <span class="font-medium text-emerald-700">结果</span>
+                                <select name="result" required class="rounded-lg border border-emerald-200 px-3 py-2 focus:border-emerald-400 focus:outline-none">
+                                    <option value="pass">通过</option>
+                                    <option value="fail">失败</option>
+                                </select>
+                            </label>
+                            <label class="flex flex-col gap-1">
+                                <span class="font-medium text-emerald-700">备注（可选）</span>
+                                <textarea name="note" rows="2" class="rounded-lg border border-emerald-200 px-3 py-2 focus:border-emerald-400 focus:outline-none" placeholder="记录问题或日志位置"></textarea>
+                            </label>
+                            <button type="submit" class="rounded-lg bg-emerald-600 py-2 text-sm font-medium text-white transition hover:bg-emerald-500">保存测试结果</button>
+                        </form>
+                        <form id="reviewForm" class="hidden grid gap-3 rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm">
+                            <label class="flex flex-col gap-1">
+                                <span class="font-medium text-indigo-700">审查人</span>
+                                <input type="text" name="reviewer" required class="rounded-lg border border-indigo-200 px-3 py-2 focus:border-indigo-400 focus:outline-none" placeholder="例如：张医生">
+                            </label>
+                            <label class="flex flex-col gap-1">
+                                <span class="font-medium text-indigo-700">审查日期</span>
+                                <input type="date" name="date" value="${new Date().toISOString().slice(0,10)}" required class="rounded-lg border border-indigo-200 px-3 py-2 focus:border-indigo-400 focus:outline-none">
+                            </label>
+                            <label class="flex flex-col gap-1">
+                                <span class="font-medium text-indigo-700">状态</span>
+                                <select name="status" required class="rounded-lg border border-indigo-200 px-3 py-2 focus:border-indigo-400 focus:outline-none">
+                                    <option value="approved">通过</option>
+                                    <option value="changes">需修改</option>
+                                    <option value="pending">等待中</option>
+                                </select>
+                            </label>
+                            <label class="flex flex-col gap-1">
+                                <span class="font-medium text-indigo-700">备注（可选）</span>
+                                <textarea name="note" rows="2" class="rounded-lg border border-indigo-200 px-3 py-2 focus:border-indigo-400 focus:outline-none" placeholder="列出建议或审批记录"></textarea>
+                            </label>
+                            <button type="submit" class="rounded-lg bg-indigo-600 py-2 text-sm font-medium text-white transition hover:bg-indigo-500">保存审查记录</button>
+                        </form>
+                    </div>
+                    <div class="mt-6 grid gap-6 md:grid-cols-2">
+                        <div>
+                            <h3 class="text-sm font-semibold text-emerald-700">测试记录</h3>
+                            <ul class="mt-3 space-y-3">
+                                ${tests.length === 0 ? '<li class="text-sm text-slate-500">暂无测试记录</li>' : tests.slice().reverse().map(renderTestItem).join('')}
+                            </ul>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-semibold text-indigo-700">代码审查</h3>
+                            <ul class="mt-3 space-y-3">
+                                ${reviews.length === 0 ? '<li class="text-sm text-slate-500">暂无代码审查记录</li>' : reviews.slice().reverse().map(renderReviewItem).join('')}
+                            </ul>
+                        </div>
+                    </div>
+                </section>
+            `;
+        }
+
+        function renderTestItem(item, index, array) {
+            const actualIndex = array.length - 1 - index;
+            const statusColor = item.result === 'pass' ? 'text-emerald-600' : 'text-rose-500';
+            const statusLabel = item.result === 'pass' ? '通过' : '失败';
+            return `
+                <li class="rounded-xl border border-emerald-100 bg-white p-4 text-sm">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <p class="text-base font-medium text-slate-800">${item.name}</p>
+                            <p class="text-xs text-slate-400">执行日期：${formatDate(item.date)}</p>
+                            <p class="mt-1 ${statusColor}">结果：${statusLabel}</p>
+                            ${item.note ? `<p class="mt-2 text-xs text-slate-500">${item.note}</p>` : ''}
+                        </div>
+                        <button data-index="${actualIndex}" class="delete-test text-xs text-rose-500">删除</button>
+                    </div>
+                </li>
+            `;
+        }
+
+        function renderReviewItem(item, index, array) {
+            const actualIndex = array.length - 1 - index;
+            const statusMap = {
+                approved: { label: '通过', color: 'text-emerald-600' },
+                changes: { label: '需修改', color: 'text-amber-500' },
+                pending: { label: '等待中', color: 'text-slate-500' }
+            };
+            const status = statusMap[item.status] ?? statusMap.pending;
+            return `
+                <li class="rounded-xl border border-indigo-100 bg-white p-4 text-sm">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <p class="text-base font-medium text-slate-800">${item.reviewer}</p>
+                            <p class="text-xs text-slate-400">审查日期：${formatDate(item.date)}</p>
+                            <p class="mt-1 ${status.color}">状态：${status.label}</p>
+                            ${item.note ? `<p class="mt-2 text-xs text-slate-500">${item.note}</p>` : ''}
+                        </div>
+                        <button data-index="${actualIndex}" class="delete-review text-xs text-rose-500">删除</button>
+                    </div>
+                </li>
+            `;
+        }
+
+        function renderSiteSummary(siteKey, label) {
+            const entries = App.state.injectionSites[siteKey] || [];
+            if (entries.length === 0) {
+                return `
+                    <div class="flex items-center justify-between rounded-lg border border-dashed border-slate-200 px-3 py-2 text-sm text-slate-500">
+                        <span>${label}</span>
+                        <span>暂无记录</span>
+                    </div>
+                `;
+            }
+            const lastDate = entries[entries.length - 1];
+            const count = entries.length;
+            return `
+                <div class="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm">
+                    <div>
+                        <p class="font-medium text-slate-700">${label}</p>
+                        <p class="text-xs text-slate-500">最近：${formatDate(lastDate)}</p>
+                    </div>
+                    <span class="text-xs text-slate-400">累计 ${count} 次</span>
+                </div>
+            `;
+        }
+
+        function renderSiteSvg() {
+            const lastEntry = App.state.injectionHistory.length
+                ? App.state.injectionHistory[App.state.injectionHistory.length - 1]
+                : null;
+            const highlight = site => {
+                const entries = App.state.injectionSites[site] || [];
+                if (entries.length === 0) return '#bfdbfe';
+                return site === (lastEntry?.site)
+                    ? '#34d399'
+                    : '#93c5fd';
+            };
+            return `
+                <svg viewBox="0 0 220 260" class="h-56 w-40">
+                    <g stroke="#2563eb" stroke-width="1.5">
+                        <path fill="${highlight('abdomen')}" d="M80 60 Q110 20 140 60 L140 150 Q110 180 80 150 Z"></path>
+                        <path fill="${highlight('thigh')}" d="M75 150 Q110 190 100 240 L80 240 Q60 190 75 150 Z"></path>
+                        <path fill="${highlight('upperArm')}" d="M145 80 Q180 100 170 160 Q150 180 140 150 Z"></path>
+                    </g>
+                </svg>
+            `;
+        }
+
+        function siteName(key) {
+            switch (key) {
+                case 'abdomen': return '腹部';
+                case 'thigh': return '大腿';
+                case 'upperArm': return '上臂';
+                default: return '未标记部位';
+            }
+        }
+
+        function bindSetupEvents() {
+            const form = document.getElementById('setupForm');
+            if (!form) return;
+            form.addEventListener('submit', event => {
+                event.preventDefault();
+                const data = new FormData(form);
+                const last = data.get('last');
+                const record = {
+                    initialized: true,
+                    currentDose: data.get('dose'),
+                    injectionDay: data.get('weekday'),
+                    startDate: last,
+                    lastInjection: last,
+                    nextInjection: nextWeek(last),
+                    reminders: {
+                        browser: data.get('notify') === 'yes',
+                        email: false
+                    }
+                };
+                App.update(state => Object.assign(state, record));
+                if (record.reminders.browser) {
+                    ensureNotificationPermission();
+                }
+            }, { once: true });
+        }
+
+        function bindDashboardEvents() {
+            const toggleRecord = document.getElementById('toggleRecord');
+            const recordForm = document.getElementById('recordForm');
+            const reminderForm = document.getElementById('reminderForm');
+            const toggleContact = document.getElementById('toggleContact');
+            const contactForm = document.getElementById('contactForm');
+            const exportButton = document.getElementById('exportButton');
+            const copySummary = document.getElementById('copySummary');
+            const toggleTestForm = document.getElementById('toggleTestForm');
+            const toggleReviewForm = document.getElementById('toggleReviewForm');
+            const testForm = document.getElementById('testForm');
+            const reviewForm = document.getElementById('reviewForm');
+
+            if (toggleRecord && recordForm) {
+                toggleRecord.addEventListener('click', () => {
+                    recordForm.classList.toggle('hidden');
+                });
+            }
+
+            if (recordForm) {
+                recordForm.addEventListener('submit', event => {
+                    event.preventDefault();
+                    const data = new FormData(recordForm);
+                    const date = data.get('date');
+                    const site = data.get('site');
+                    if (!date || !site) return;
+                    const note = data.get('note');
+                    const entry = {
+                        date,
+                        site,
+                        note,
+                        recordedAt: new Date().toISOString()
+                    };
+                    App.update(state => {
+                        if (!state.startDate) {
+                            state.startDate = date;
+                        }
+                        state.lastInjection = date;
+                        state.nextInjection = nextWeek(date);
+                        state.injectionHistory.push(entry);
+                        state.injectionSites[site] = [...(state.injectionSites[site] || []), date];
+                    });
+                    setTimeout(() => {
+                        const formEl = document.getElementById('recordForm');
+                        if (formEl) {
+                            formEl.reset();
+                            const dateInput = formEl.querySelector('input[name="date"]');
+                            if (dateInput) {
+                                dateInput.value = new Date().toISOString().slice(0, 10);
+                            }
+                        }
+                    }, 0);
+                });
+            }
+
+            if (reminderForm) {
+                reminderForm.addEventListener('submit', event => {
+                    event.preventDefault();
+                    const data = new FormData(reminderForm);
+                    App.update(state => {
+                        state.reminders.browser = !!data.get('browser');
+                        state.reminders.email = !!data.get('email');
+                    });
+                    if (App.state.reminders.browser) {
+                        ensureNotificationPermission();
+                    }
+                });
+            }
+
+            if (toggleContact && contactForm) {
+                toggleContact.addEventListener('click', () => {
+                    contactForm.classList.toggle('hidden');
+                });
+            }
+
+            if (contactForm) {
+                contactForm.addEventListener('submit', event => {
+                    event.preventDefault();
+                    const data = new FormData(contactForm);
+                    const name = data.get('name');
+                    const phone = data.get('phone');
+                    if (!name || !phone) return;
+                    const note = data.get('note');
+                    App.update(state => {
+                        state.contacts.push({ name, phone, note });
+                    });
+                    setTimeout(() => {
+                        const formEl = document.getElementById('contactForm');
+                        if (formEl) {
+                            formEl.reset();
+                            formEl.classList.add('hidden');
+                        }
+                    }, 0);
+                });
+            }
+
+            document.querySelectorAll('.delete-contact').forEach(button => {
+                button.addEventListener('click', () => {
+                    const index = Number(button.dataset.index);
+                    App.update(state => {
+                        state.contacts.splice(index, 1);
+                    });
+                });
+            });
+
+            if (toggleTestForm && testForm) {
+                toggleTestForm.addEventListener('click', () => {
+                    testForm.classList.toggle('hidden');
+                });
+            }
+
+            if (toggleReviewForm && reviewForm) {
+                toggleReviewForm.addEventListener('click', () => {
+                    reviewForm.classList.toggle('hidden');
+                });
+            }
+
+            if (testForm) {
+                testForm.addEventListener('submit', event => {
+                    event.preventDefault();
+                    const data = new FormData(testForm);
+                    const name = data.get('name');
+                    const date = data.get('date');
+                    const result = data.get('result');
+                    if (!name || !date || !result) return;
+                    const note = data.get('note');
+                    App.update(state => {
+                        if (!state.quality) {
+                            state.quality = { tests: [], reviews: [] };
+                        }
+                        state.quality.tests.push({ name, date, result, note });
+                    });
+                    setTimeout(() => {
+                        const formEl = document.getElementById('testForm');
+                        if (formEl) {
+                            formEl.reset();
+                            formEl.classList.add('hidden');
+                            const dateInput = formEl.querySelector('input[name="date"]');
+                            if (dateInput) {
+                                dateInput.value = new Date().toISOString().slice(0, 10);
+                            }
+                        }
+                    }, 0);
+                });
+            }
+
+            if (reviewForm) {
+                reviewForm.addEventListener('submit', event => {
+                    event.preventDefault();
+                    const data = new FormData(reviewForm);
+                    const reviewer = data.get('reviewer');
+                    const date = data.get('date');
+                    const status = data.get('status');
+                    if (!reviewer || !date || !status) return;
+                    const note = data.get('note');
+                    App.update(state => {
+                        if (!state.quality) {
+                            state.quality = { tests: [], reviews: [] };
+                        }
+                        state.quality.reviews.push({ reviewer, date, status, note });
+                    });
+                    setTimeout(() => {
+                        const formEl = document.getElementById('reviewForm');
+                        if (formEl) {
+                            formEl.reset();
+                            formEl.classList.add('hidden');
+                            const dateInput = formEl.querySelector('input[name="date"]');
+                            if (dateInput) {
+                                dateInput.value = new Date().toISOString().slice(0, 10);
+                            }
+                        }
+                    }, 0);
+                });
+            }
+
+            document.querySelectorAll('.delete-test').forEach(button => {
+                button.addEventListener('click', () => {
+                    const index = Number(button.dataset.index);
+                    App.update(state => {
+                        if (!state.quality) return;
+                        state.quality.tests.splice(index, 1);
+                    });
+                });
+            });
+
+            document.querySelectorAll('.delete-review').forEach(button => {
+                button.addEventListener('click', () => {
+                    const index = Number(button.dataset.index);
+                    App.update(state => {
+                        if (!state.quality) return;
+                        state.quality.reviews.splice(index, 1);
+                    });
+                });
+            });
+
+            if (exportButton) {
+                exportButton.addEventListener('click', () => {
+                    const dataStr = JSON.stringify(App.state, null, 2);
+                    const blob = new Blob([dataStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `tirzepatide-data-${Date.now()}.json`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(url);
+                });
+            }
+
+            if (copySummary) {
+                copySummary.addEventListener('click', async () => {
+                    const recent = App.state.injectionHistory.slice(-4);
+                    if (recent.length === 0) {
+                        alert('暂无可复制的注射记录');
+                        return;
+                    }
+                    const summary = recent.map(item => `${formatDate(item.date)} · ${siteName(item.site)}${item.note ? `（${item.note}）` : ''}`).join('\n');
+                    try {
+                        await navigator.clipboard.writeText(summary);
+                        alert('最近 4 次注射记录已复制到剪贴板');
+                    } catch (err) {
+                        console.error(err);
+                        alert('复制失败，请手动选择文本复制');
+                    }
                 });
             }
         }
 
-        // 检查是否需要提醒
-        function checkReminders() {
-            if (!appState.initialized || !appState.nextInjection) return;
-            
+        function evaluateReminders() {
+            if (!App.state.reminders.browser || !App.state.nextInjection) return;
+            ensureNotificationPermission();
+            const next = new Date(App.state.nextInjection);
+            if (Number.isNaN(next.getTime())) return;
             const now = new Date();
-            const next = new Date(appState.nextInjection);
-            const hoursUntil = (next - now) / (1000 * 60 * 60);
-            
-            // 提前24小时提醒
-            if (hoursUntil <= 24 && hoursUntil > 23) {
-                sendNotification('注射提醒', '您的下次 Tirzepatide 注射将在明天进行！');
+            const hours = (next - now) / (1000 * 60 * 60);
+            if (hours <= 24 && hours > 23) {
+                sendNotification('注射提醒', '距离下一次 Tirzepatide 注射还有 24 小时');
             }
-            
-            // 当天提醒
-            if (hoursUntil <= 1 && hoursUntil > 0) {
-                sendNotification('注射提醒', '该进行 Tirzepatide 注射了！');
+            if (hours <= 1 && hours > 0) {
+                sendNotification('注射提醒', '该进行 Tirzepatide 注射啦！');
             }
         }
 
-        // 初始化设置
-        function InitSetup() {
-            return `
-                <div class="bg-white rounded-2xl shadow-xl p-8 max-w-2xl mx-auto">
-                    <div class="text-center mb-8">
-                        <div class="text-6xl mb-4">💉</div>
-                        <h1 class="text-3xl font-bold text-gray-800 mb-2">Tirzepatide 注射管理</h1>
-                        <p class="text-gray-600">开始您的注射管理之旅</p>
-                    </div>
-                    
-                    <div class="space-y-6">
-                        <div>
-                            <label class="block text-lg font-semibold text-gray-700 mb-4">选择您的情况：</label>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <button onclick="startNewInjection()" 
-                                    class="p-6 border-2 border-blue-300 rounded-xl hover:bg-blue-50 hover:border-blue-500 transition-all">
-                                    <div class="text-4xl mb-2">🆕</div>
-                                    <div class="font-semibold text-gray-800">新开始注射</div>
-                                    <div class="text-sm text-gray-600 mt-1">第一次使用 Tirzepatide</div>
-                                </button>
-                                
-                                <button onclick="continueExisting()" 
-                                    class="p-6 border-2 border-green-300 rounded-xl hover:bg-green-50 hover:border-green-500 transition-all">
-                                    <div class="text-4xl mb-2">🔄</div>
-                                    <div class="font-semibold text-gray-800">已在进行中</div>
-                                    <div class="text-sm text-gray-600 mt-1">继续记录已有疗程</div>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
+        document.getElementById('resetButton').addEventListener('click', () => {
+            if (confirm('确定要清空全部数据吗？该操作不可恢复。')) {
+                App.reset();
+            }
+        });
 
-        // 新开始设置
-        function NewInjectionSetup() {
-            return `
-                <div class="bg-white rounded-2xl shadow-xl p-8 max-w-2xl mx-auto">
-                    <h2 class="text-2xl font-bold text-gray-800 mb-6">新开始注射设置</h2>
-                    
-                    <div class="space-y-6">
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">起始剂量 (mg)</label>
-                            <select id="initialDose" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                <option value="2.5">2.5 mg</option>
-                                <option value="5">5 mg</option>
-                                <option value="7.5">7.5 mg</option>
-                                <option value="10">10 mg</option>
-                                <option value="12.5">12.5 mg</option>
-                                <option value="15">15 mg</option>
-                            </select>
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">首次注射日期</label>
-                            <input type="date" id="firstDate" 
-                                class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                                max="${new Date().toISOString().split('T')[0]}">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">每周注射日</label>
-                            <select id="weekday" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                <option value="0">周日</option>
-                                <option value="1">周一</option>
-                                <option value="2">周二</option>
-                                <option value="3">周三</option>
-                                <option value="4">周四</option>
-                                <option value="5">周五</option>
-                                <option value="6">周六</option>
-                            </select>
-                        </div>
-                        
-                        <div class="flex gap-4">
-                            <button onclick="cancelSetup()" 
-                                class="flex-1 px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all">
-                                返回
-                            </button>
-                            <button onclick="confirmNewInjection()" 
-                                class="flex-1 px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-all font-semibold">
-                                开始管理
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        // 继续已有疗程设置
-        function ContinueSetup() {
-            return `
-                <div class="bg-white rounded-2xl shadow-xl p-8 max-w-2xl mx-auto">
-                    <h2 class="text-2xl font-bold text-gray-800 mb-6">继续已有疗程</h2>
-                    
-                    <div class="space-y-6">
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">当前剂量 (mg)</label>
-                            <select id="currentDose" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                <option value="2.5">2.5 mg</option>
-                                <option value="5">5 mg</option>
-                                <option value="7.5">7.5 mg</option>
-                                <option value="10">10 mg</option>
-                                <option value="12.5">12.5 mg</option>
-                                <option value="15">15 mg</option>
-                            </select>
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">当前是第几针</label>
-                            <select id="doseProgress" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                <option value="1">第 1 针（共4针）</option>
-                                <option value="2">第 2 针（共4针）</option>
-                                <option value="3">第 3 针（共4针）</option>
-                                <option value="4">第 4 针（共4针）</option>
-                            </select>
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">上次注射日期</label>
-                            <input type="date" id="lastDate" 
-                                class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                                max="${new Date().toISOString().split('T')[0]}">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">每周注射日</label>
-                            <select id="weekday" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                <option value="0">周日</option>
-                                <option value="1">周一</option>
-                                <option value="2">周二</option>
-                                <option value="3">周三</option>
-                                <option value="4">周四</option>
-                                <option value="5">周五</option>
-                                <option value="6">周六</option>
-                            </select>
-                        </div>
-                        
-                        <div class="flex gap-4">
-                            <button onclick="cancelSetup()" 
-                                class="flex-1 px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all">
-                                返回
-                            </button>
-                            <button onclick="confirmContinue()" 
-                                class="flex-1 px-6 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-all font-semibold">
-                                继续管理
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        // 主界面
-        function MainDashboard() {
-            const daysSince = getDaysSince(appState.lastInjection);
-            const isOverdue = daysSince > 7;
-            const isMissed = daysSince > 4 && daysSince <= 11;
-            const shouldSkip = daysSince > 11;
-            
-            const doseProgress = appState.doseCount;
-            const needsPurchase = doseProgress === 4;
-            const needsDoseChange = doseProgress === 0 && appState.injectionHistory.length > 0;
-            
-            return `
-                <div class="space-y-6">
-                    <!-- 顶部状态卡 -->
-                    <div class="bg-gradient-to-r from-blue-500 to-green-500 rounded-2xl shadow-xl p-8 text-white">
-                        <div class="flex items-center justify-between mb-6">
-                            <div>
-                                <h1 class="text-3xl font-bold mb-2">Tirzepatide 注射管理</h1>
-                                <p class="text-blue-100">当前剂量：${appState.currentDose} mg - 第 ${doseProgress}/4 针</p>
-                            </div>
-                            <div class="text-6xl">💉</div>
-                        </div>
-                        
-                        ${isOverdue ? `
-                            <div class="bg-red-500 bg-opacity-30 border-2 border-red-300 rounded-lg p-4 mb-4">
-                                <div class="flex items-center gap-2 mb-2">
-                                    <span class="text-2xl">⚠️</span>
-                                    <span class="font-bold text-lg">注射超期</span>
-                                </div>
-                                <p class="text-sm">距离上次注射已经 ${daysSince} 天</p>
-                                ${shouldSkip ? `
-                                    <p class="text-sm font-semibold mt-2">⚠️ 已超过11天，建议跳过本次，重新安排下次注射</p>
-                                    <button onclick="skipAndReschedule()" 
-                                        class="mt-3 px-4 py-2 bg-white text-red-600 rounded-lg hover:bg-red-50 transition-all font-semibold">
-                                        跳过并重新安排
-                                    </button>
-                                ` : isMissed ? `
-                                    <p class="text-sm font-semibold mt-2">💡 在4-11天内，可以尽快补打</p>
-                                ` : ''}
-                            </div>
-                        ` : ''}
-                        
-                        ${needsPurchase ? `
-                            <div class="bg-yellow-500 bg-opacity-30 border-2 border-yellow-300 rounded-lg p-4 mb-4">
-                                <div class="flex items-center gap-2">
-                                    <span class="text-2xl">🛒</span>
-                                    <span class="font-bold">购买提醒：已完成4针，请及时采购下一瓶药物！</span>
-                                </div>
-                            </div>
-                        ` : ''}
-                        
-                        ${needsDoseChange ? `
-                            <div class="bg-purple-500 bg-opacity-30 border-2 border-purple-300 rounded-lg p-4 mb-4">
-                                <div class="flex items-center gap-2 mb-2">
-                                    <span class="text-2xl">💊</span>
-                                    <span class="font-bold">剂量确认：完成上一轮4针，是否需要更换剂量？</span>
-                                </div>
-                                <div class="flex gap-2 mt-3">
-                                    <button onclick="changeDose()" 
-                                        class="px-4 py-2 bg-white text-purple-600 rounded-lg hover:bg-purple-50 transition-all font-semibold">
-                                        更换剂量
-                                    </button>
-                                    <button onclick="keepDose()" 
-                                        class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all">
-                                        保持当前
-                                    </button>
-                                </div>
-                            </div>
-                        ` : ''}
-                        
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div class="bg-white bg-opacity-20 rounded-lg p-4">
-                                <div class="text-sm text-blue-100 mb-1">上次注射</div>
-                                <div class="text-2xl font-bold">${formatDate(appState.lastInjection)}</div>
-                                <div class="text-sm text-blue-100 mt-1">${daysSince} 天前</div>
-                            </div>
-                            <div class="bg-white bg-opacity-20 rounded-lg p-4">
-                                <div class="text-sm text-blue-100 mb-1">下次注射</div>
-                                <div class="text-2xl font-bold">${formatDate(appState.nextInjection)}</div>
-                                <div class="text-sm text-blue-100 mt-1">${getWeekdayName(appState.injectionDay)}</div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- 快捷操作 -->
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <button onclick="showInjectionCheck()" 
-                            class="bg-white rounded-xl shadow-lg p-6 hover:shadow-xl transition-all text-left">
-                            <div class="text-4xl mb-2">💉</div>
-                            <div class="font-bold text-gray-800 text-lg">开始注射</div>
-                            <div class="text-sm text-gray-600 mt-1">风险检查 + 记录</div>
-                        </button>
-                        
-                        <button onclick="showSiteRotation()" 
-                            class="bg-white rounded-xl shadow-lg p-6 hover:shadow-xl transition-all text-left">
-                            <div class="text-4xl mb-2">🎯</div>
-                            <div class="font-bold text-gray-800 text-lg">部位轮换</div>
-                            <div class="text-sm text-gray-600 mt-1">查看注射位置</div>
-                        </button>
-                        
-                        <button onclick="showHistory()" 
-                            class="bg-white rounded-xl shadow-lg p-6 hover:shadow-xl transition-all text-left">
-                            <div class="text-4xl mb-2">📊</div>
-                            <div class="font-bold text-gray-800 text-lg">注射历史</div>
-                            <div class="text-sm text-gray-600 mt-1">查看所有记录</div>
-                        </button>
-                    </div>
-                    
-                    <!-- 设置和指南 -->
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div class="bg-white rounded-xl shadow-lg p-6">
-                            <h3 class="font-bold text-gray-800 text-lg mb-4">⚙️ 提醒设置</h3>
-                            <button onclick="showSettings()" 
-                                class="w-full px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-all">
-                                管理提醒和联系人
-                            </button>
-                        </div>
-                        
-                        <div class="bg-white rounded-xl shadow-lg p-6">
-                            <h3 class="font-bold text-gray-800 text-lg mb-4">📖 使用指南</h3>
-                            <button onclick="showGuide()" 
-                                class="w-full px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-all">
-                                查看注射说明
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        // 注射前检查
-        function InjectionCheck() {
-            return `
-                <div class="bg-white rounded-2xl shadow-xl p-8 max-w-2xl mx-auto">
-                    <h2 class="text-2xl font-bold text-gray-800 mb-6">注射前风险检查</h2>
-                    
-                    <div class="space-y-4 mb-8">
-                        <div class="border-l-4 border-blue-500 bg-blue-50 p-4 rounded-r-lg">
-                            <label class="flex items-start gap-3 cursor-pointer">
-                                <input type="checkbox" id="check1" class="mt-1 w-5 h-5">
-                                <div>
-                                    <div class="font-semibold text-gray-800">❄️ 冷藏环境确认</div>
-                                    <div class="text-sm text-gray-600">药物已在2-8°C冷藏，或室温保存不超过21天</div>
-                                </div>
-                            </label>
-                        </div>
-                        
-                        <div class="border-l-4 border-green-500 bg-green-50 p-4 rounded-r-lg">
-                            <label class="flex items-start gap-3 cursor-pointer">
-                                <input type="checkbox" id="check2" class="mt-1 w-5 h-5">
-                                <div>
-                                    <div class="font-semibold text-gray-800">💧 药液检查</div>
-                                    <div class="text-sm text-gray-600">液体清澈透明或微黄，无颗粒物或浑浊</div>
-                                </div>
-                            </label>
-                        </div>
-                        
-                        <div class="border-l-4 border-yellow-500 bg-yellow-50 p-4 rounded-r-lg">
-                            <label class="flex items-start gap-3 cursor-pointer">
-                                <input type="checkbox" id="check3" class="mt-1 w-5 h-5">
-                                <div>
-                                    <div class="font-semibold text-gray-800">📅 有效期确认</div>
-                                    <div class="text-sm text-gray-600">检查包装上的有效期，确保未过期</div>
-                                </div>
-                            </label>
-                        </div>
-                        
-                        <div class="border-l-4 border-purple-500 bg-purple-50 p-4 rounded-r-lg">
-                            <label class="flex items-start gap-3 cursor-pointer">
-                                <input type="checkbox" id="check4" class="mt-1 w-5 h-5">
-                                <div>
-                                    <div class="font-semibold text-gray-800">🧼 清洁准备</div>
-                                    <div class="text-sm text-gray-600">已洗手，注射部位已用酒精消毒并晾干</div>
-                                </div>
-                            </label>
-                        </div>
-                    </div>
-                    
-                    <div class="flex gap-4">
-                        <button onclick="cancelInjection()" 
-                            class="flex-1 px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all">
-                            取消
-                        </button>
-                        <button onclick="proceedToRecord()" id="proceedBtn"
-                            class="flex-1 px-6 py-3 bg-blue-500 text-white rounded-lg transition-all font-semibold opacity-50 cursor-not-allowed"
-                            disabled>
-                            继续记录
-                        </button>
-                    </div>
-                </div>
-                
-                <script>
-                    const checks = ['check1', 'check2', 'check3', 'check4'];
-                    checks.forEach(id => {
-                        document.getElementById(id).addEventListener('change', function() {
-                            const allChecked = checks.every(c => document.getElementById(c).checked);
-                            const btn = document.getElementById('proceedBtn');
-                            if (allChecked) {
-                                btn.disabled = false;
-                                btn.classList.remove('opacity-50', 'cursor-not-allowed');
-                                btn.classList.add('hover:bg-blue-600');
-                            } else {
-                                btn.disabled = true;
-                                btn.classList.add('opacity-50', 'cursor-not-allowed');
-                                btn.classList.remove('hover:bg-blue-600');
-                            }
-                        });
-                    });
-                </script>
-            `;
-        }
-
-        // 检查部位是否可用（4周间隔）
-        function isSiteAvailable(siteId) {
-            const siteHistory = appState.injectionSites[siteId];
-            if (siteHistory.length === 0) return true;
-            
-            const lastUsed = new Date(siteHistory[siteHistory.length - 1]);
-            const now = new Date();
-            const daysSince = Math.floor((now - lastUsed) / (1000 * 60 * 60 * 24));
-            
-            return daysSince >= 28; // 4周 = 28天
-        }
-
-        // 记录注射
-        function RecordInjection() {
-            const sites = [
-                { id: 'abdomen', name: '腹部', icon: '🟢', desc: '肚脐周围2英寸外' },
-                { id: 'thigh', name: '大腿', icon: '🔵', desc: '大腿前侧上部' },
-                { id: 'upperArm', name: '上臂', icon: '🟡', desc: '上臂外侧后部' }
-            ];
-            
-            return `
-                <div class="bg-white rounded-2xl shadow-xl p-8 max-w-2xl mx-auto">
-                    <h2 class="text-2xl font-bold text-gray-800 mb-6">记录本次注射</h2>
-                    
-                    <div class="space-y-6">
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">注射部位</label>
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                ${sites.map(site => {
-                                    const available = isSiteAvailable(site.id);
-                                    const siteHistory = appState.injectionSites[site.id];
-                                    const lastUsed = siteHistory.length > 0 ? siteHistory[siteHistory.length - 1] : null;
-                                    const daysSince = lastUsed ? getDaysSince(lastUsed) : null;
-                                    
-                                    return `
-                                    <label class="cursor-pointer">
-                                        <input type="radio" name="site" value="${site.id}" class="peer hidden">
-                                        <div class="border-2 ${available ? 'border-gray-300 peer-checked:border-blue-500 peer-checked:bg-blue-50' : 'border-yellow-400 bg-yellow-50 peer-checked:border-yellow-600'} rounded-lg p-4 transition-all">
-                                            <div class="text-3xl mb-2">${site.icon}</div>
-                                            <div class="font-semibold text-gray-800">${site.name}</div>
-                                            <div class="text-xs text-gray-600 mt-1">${site.desc}</div>
-                                            ${!available ? `
-                                                <div class="text-xs text-yellow-700 font-semibold mt-2 flex items-center gap-1">
-                                                    ⚠️ ${daysSince}天前使用
-                                                </div>
-                                            ` : lastUsed ? `
-                                                <div class="text-xs text-green-600 mt-2">
-                                                    ✓ 可用 (${daysSince}天前)
-                                                </div>
-                                            ` : `
-                                                <div class="text-xs text-green-600 mt-2">
-                                                    ✓ 从未使用
-                                                </div>
-                                            `}
-                                        </div>
-                                    </label>
-                                `}).join('')}
-                            </div>
-                            <div class="mt-3 text-sm text-gray-600 bg-blue-50 border border-blue-200 rounded-lg p-3">
-                                💡 <strong>轮换提示：</strong>建议每次更换注射部位，同一部位间隔至少4周（28天）
-                            </div>
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">注射时间</label>
-                            <input type="datetime-local" id="injectionTime" 
-                                value="${new Date().toISOString().slice(0, 16)}"
-                                class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">副作用记录（可选）</label>
-                            <div class="space-y-2">
-                                <label class="flex items-center gap-2">
-                                    <input type="checkbox" value="nausea" class="w-4 h-4">
-                                    <span class="text-gray-700">恶心</span>
-                                </label>
-                                <label class="flex items-center gap-2">
-                                    <input type="checkbox" value="vomiting" class="w-4 h-4">
-                                    <span class="text-gray-700">呕吐</span>
-                                </label>
-                                <label class="flex items-center gap-2">
-                                    <input type="checkbox" value="diarrhea" class="w-4 h-4">
-                                    <span class="text-gray-700">腹泻</span>
-                                </label>
-                                <label class="flex items-center gap-2">
-                                    <input type="checkbox" value="abdominal_pain" class="w-4 h-4">
-                                    <span class="text-gray-700">腹痛</span>
-                                </label>
-                                <label class="flex items-center gap-2">
-                                    <input type="checkbox" value="site_reaction" class="w-4 h-4">
-                                    <span class="text-gray-700">注射部位反应</span>
-                                </label>
-                            </div>
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-semibold text-gray-700 mb-2">备注（可选）</label>
-                            <textarea id="notes" rows="3" 
-                                class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                                placeholder="记录任何其他信息..."></textarea>
-                        </div>
-                        
-                        <div class="flex gap-4">
-                            <button onclick="cancelInjection()" 
-                                class="flex-1 px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all">
-                                取消
-                            </button>
-                            <button onclick="saveInjection()" 
-                                class="flex-1 px-6 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-all font-semibold">
-                                保存记录
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        // 全局函数
-        window.startNewInjection = function() {
-            document.getElementById('app').innerHTML = NewInjectionSetup();
-        };
-
-        window.continueExisting = function() {
-            document.getElementById('app').innerHTML = ContinueSetup();
-        };
-
-        window.cancelSetup = function() {
+        document.addEventListener('DOMContentLoaded', () => {
             render();
-        };
-
-        window.confirmNewInjection = function() {
-            const dose = document.getElementById('initialDose').value;
-            const date = document.getElementById('firstDate').value;
-            const weekday = parseInt(document.getElementById('weekday').value);
-            
-            if (!date) {
-                alert('请选择首次注射日期');
-                return;
-            }
-            
-            appState.initialized = true;
-            appState.currentDose = dose;
-            appState.doseCount = 1;
-            appState.injectionDay = weekday;
-            appState.lastInjection = date;
-            appState.nextInjection = calculateNextInjection(date, weekday);
-            
-            saveState();
-            requestNotificationPermission();
-        };
-
-        window.confirmContinue = function() {
-            const dose = document.getElementById('currentDose').value;
-            const progress = parseInt(document.getElementById('doseProgress').value);
-            const lastDate = document.getElementById('lastDate').value;
-            const weekday = parseInt(document.getElementById('weekday').value);
-            
-            if (!lastDate) {
-                alert('请选择上次注射日期');
-                return;
-            }
-            
-            appState.initialized = true;
-            appState.currentDose = dose;
-            appState.doseCount = progress;
-            appState.injectionDay = weekday;
-            appState.lastInjection = lastDate;
-            appState.nextInjection = calculateNextInjection(lastDate, weekday);
-            
-            saveState();
-            requestNotificationPermission();
-        };
-
-        window.showInjectionCheck = function() {
-            document.getElementById('app').innerHTML = InjectionCheck();
-        };
-
-        window.cancelInjection = function() {
-            render();
-        };
-
-        window.proceedToRecord = function() {
-            document.getElementById('app').innerHTML = RecordInjection();
-        };
-
-        window.saveInjection = function() {
-            const site = document.querySelector('input[name="site"]:checked');
-            if (!site) {
-                alert('请选择注射部位');
-                return;
-            }
-            
-            const time = document.getElementById('injectionTime').value;
-            const sideEffects = Array.from(document.querySelectorAll('input[type="checkbox"]:checked'))
-                .map(cb => cb.value);
-            const notes = document.getElementById('notes').value;
-            
-            // 记录注射
-            const injection = {
-                date: time,
-                dose: appState.currentDose,
-                site: site.value,
-                sideEffects,
-                notes,
-                doseNumber: appState.doseCount
-            };
-            
-            appState.injectionHistory.push(injection);
-            appState.lastInjection = time;
-            appState.nextInjection = calculateNextInjection(time, appState.injectionDay);
-            appState.doseCount = appState.doseCount === 4 ? 0 : appState.doseCount + 1;
-            
-            // 记录注射部位使用时间
-            appState.injectionSites[site.value].push(time);
-            
-            saveState();
-            
-            // 显示成功消息
-            alert('✅ 注射记录已保存！');
-        };
-
-        window.skipAndReschedule = function() {
-            const newDate = prompt('请输入新的注射日期 (YYYY-MM-DD)：');
-            if (newDate) {
-                appState.lastInjection = newDate;
-                appState.nextInjection = calculateNextInjection(newDate, appState.injectionDay);
-                saveState();
-            }
-        };
-
-        window.changeDose = function() {
-            const newDose = prompt('请输入新剂量 (2.5, 5, 7.5, 10, 12.5, 15)：');
-            if (newDose && ['2.5', '5', '7.5', '10', '12.5', '15'].includes(newDose)) {
-                appState.currentDose = newDose;
-                appState.doseCount = 1;
-                saveState();
-            }
-        };
-
-        window.keepDose = function() {
-            appState.doseCount = 1;
-            saveState();
-        };
-
-        window.showSettings = function() {
-            const html = `
-                <div class="bg-white rounded-2xl shadow-xl p-8 max-w-3xl mx-auto">
-                    <div class="flex items-center justify-between mb-6">
-                        <h2 class="text-2xl font-bold text-gray-800">⚙️ 设置</h2>
-                        <button onclick="render()" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">
-                            返回
-                        </button>
-                    </div>
-                    
-                    <!-- 通知设置 -->
-                    <div class="mb-8">
-                        <h3 class="text-lg font-bold text-gray-800 mb-4">🔔 通知设置</h3>
-                        <div class="space-y-4">
-                            <label class="flex items-center justify-between p-4 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer">
-                                <div>
-                                    <div class="font-semibold text-gray-800">浏览器通知</div>
-                                    <div class="text-sm text-gray-600">在浏览器中接收注射提醒</div>
-                                </div>
-                                <input type="checkbox" id="browserNotif" ${appState.notifications.browser ? 'checked' : ''} 
-                                    onchange="toggleBrowserNotification()"
-                                    class="w-5 h-5 text-blue-500">
-                            </label>
-                            
-                            <div class="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                                <div class="text-sm text-gray-700">
-                                    <strong>提醒时机：</strong>
-                                    <ul class="mt-2 space-y-1 ml-4">
-                                        <li>• 注射前24小时</li>
-                                        <li>• 注射当天（提前1小时）</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- 联系人管理 -->
-                    <div class="mb-8">
-                        <h3 class="text-lg font-bold text-gray-800 mb-4">👥 提醒抄送联系人</h3>
-                        
-                        <div class="mb-4">
-                            <div class="flex gap-2">
-                                <input type="text" id="contactName" placeholder="姓名" 
-                                    class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                <input type="email" id="contactEmail" placeholder="邮箱地址" 
-                                    class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-                                <button onclick="addContact()" 
-                                    class="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-semibold">
-                                    添加
-                                </button>
-                            </div>
-                            <div class="text-xs text-gray-500 mt-1">
-                                添加家人或朋友的联系方式，他们将收到您的注射提醒通知
-                            </div>
-                        </div>
-                        
-                        <div class="space-y-2">
-                            ${appState.contacts.length === 0 ? `
-                                <div class="text-center py-8 text-gray-500 border-2 border-dashed border-gray-200 rounded-lg">
-                                    <div class="text-4xl mb-2">👤</div>
-                                    <p>暂无联系人</p>
-                                </div>
-                            ` : appState.contacts.map((contact, index) => `
-                                <div class="flex items-center justify-between p-4 border border-gray-200 rounded-lg hover:bg-gray-50">
-                                    <div>
-                                        <div class="font-semibold text-gray-800">${contact.name}</div>
-                                        <div class="text-sm text-gray-600">${contact.email}</div>
-                                    </div>
-                                    <button onclick="removeContact(${index})" 
-                                        class="px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg transition-all">
-                                        删除
-                                    </button>
-                                </div>
-                            `).join('')}
-                        </div>
-                        
-                        <div class="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-                            <div class="text-sm text-gray-700">
-                                <strong>📧 邮件提醒功能：</strong>实际邮件发送需要配置邮件服务器。当前添加的联系人将保存在您的设备中，作为提醒名单参考。
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- 数据管理 -->
-                    <div>
-                        <h3 class="text-lg font-bold text-gray-800 mb-4">💾 数据管理</h3>
-                        <div class="space-y-3">
-                            <button onclick="exportData()" 
-                                class="w-full px-4 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-all font-semibold">
-                                📤 导出所有数据
-                            </button>
-                            
-                            <button onclick="confirmClearData()" 
-                                class="w-full px-4 py-3 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-all font-semibold">
-                                🗑️ 清除所有数据
-                            </button>
-                            
-                            <div class="text-xs text-gray-500 text-center">
-                                数据保存在您的浏览器本地，不会上传到服务器
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            document.getElementById('app').innerHTML = html;
-        };
-        
-        window.toggleBrowserNotification = function() {
-            const enabled = document.getElementById('browserNotif').checked;
-            appState.notifications.browser = enabled;
-            
-            if (enabled) {
-                requestNotificationPermission();
-            }
-            
-            saveState();
-        };
-        
-        window.addContact = function() {
-            const name = document.getElementById('contactName').value.trim();
-            const email = document.getElementById('contactEmail').value.trim();
-            
-            if (!name || !email) {
-                alert('请填写姓名和邮箱');
-                return;
-            }
-            
-            if (!email.includes('@')) {
-                alert('请输入有效的邮箱地址');
-                return;
-            }
-            
-            appState.contacts.push({ name, email });
-            saveState();
-            showSettings(); // 刷新界面
-        };
-        
-        window.removeContact = function(index) {
-            if (confirm('确定要删除这个联系人吗？')) {
-                appState.contacts.splice(index, 1);
-                saveState();
-                showSettings(); // 刷新界面
-            }
-        };
-        
-        window.exportData = function() {
-            const dataStr = JSON.stringify(appState, null, 2);
-            const dataBlob = new Blob([dataStr], { type: 'application/json' });
-            const url = URL.createObjectURL(dataBlob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `tirzepatide-data-${new Date().toISOString().split('T')[0]}.json`;
-            link.click();
-            URL.revokeObjectURL(url);
-            
-            alert('✅ 数据已导出！');
-        };
-        
-        window.confirmClearData = function() {
-            if (confirm('⚠️ 确定要清除所有数据吗？此操作不可恢复！')) {
-                if (confirm('再次确认：这将删除所有注射记录、设置和联系人信息。')) {
-                    Storage.clear('tirzepatide_data');
-                    location.reload();
-                }
-            }
-        };
-
-        window.showGuide = function() {
-            const html = `
-                <div class="bg-white rounded-2xl shadow-xl p-8 max-w-4xl mx-auto">
-                    <div class="flex items-center justify-between mb-6">
-                        <h2 class="text-2xl font-bold text-gray-800">📖 Tirzepatide 注射使用指南</h2>
-                        <button onclick="render()" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">
-                            返回
-                        </button>
-                    </div>
-                    
-                    <div class="space-y-6">
-                        <!-- 基本信息 -->
-                        <div class="border-l-4 border-blue-500 bg-blue-50 p-6 rounded-r-xl">
-                            <h3 class="text-lg font-bold text-gray-800 mb-3">💊 基本信息</h3>
-                            <div class="space-y-2 text-gray-700">
-                                <p><strong>商品名：</strong>Mounjaro（糖尿病）/ Zepbound（减重）</p>
-                                <p><strong>通用名：</strong>Tirzepatide（替尔泊肽）</p>
-                                <p><strong>给药方式：</strong>皮下注射，每周一次</p>
-                                <p><strong>常规剂量：</strong>2.5mg → 5mg → 7.5mg → 10mg → 12.5mg → 15mg</p>
-                            </div>
-                        </div>
-                        
-                        <!-- 储存要求 -->
-                        <div class="border-l-4 border-green-500 bg-green-50 p-6 rounded-r-xl">
-                            <h3 class="text-lg font-bold text-gray-800 mb-3">❄️ 储存要求</h3>
-                            <ul class="space-y-2 text-gray-700">
-                                <li class="flex items-start gap-2">
-                                    <span class="text-green-500 font-bold">✓</span>
-                                    <span><strong>冷藏保存：</strong>2-8°C（冰箱冷藏室）</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-green-500 font-bold">✓</span>
-                                    <span><strong>室温存放：</strong>最高30°C，最多21天</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-red-500 font-bold">✗</span>
-                                    <span><strong>不可冷冻：</strong>如已冷冻请丢弃</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-green-500 font-bold">✓</span>
-                                    <span><strong>避光保存：</strong>保持在原包装盒中</span>
-                                </li>
-                            </ul>
-                        </div>
-                        
-                        <!-- 注射步骤 -->
-                        <div class="border-l-4 border-purple-500 bg-purple-50 p-6 rounded-r-xl">
-                            <h3 class="text-lg font-bold text-gray-800 mb-3">💉 注射步骤</h3>
-                            <div class="space-y-4">
-                                <div class="bg-white p-4 rounded-lg">
-                                    <div class="font-bold text-purple-700 mb-2">步骤 1：准备</div>
-                                    <ul class="text-sm text-gray-700 space-y-1 ml-4">
-                                        <li>• 洗手并擦干</li>
-                                        <li>• 从冰箱取出药物，检查有效期</li>
-                                        <li>• 检查液体：应清澈透明或微黄，无颗粒</li>
-                                        <li>• 准备酒精棉片、锐器盒</li>
-                                    </ul>
-                                </div>
-                                
-                                <div class="bg-white p-4 rounded-lg">
-                                    <div class="font-bold text-purple-700 mb-2">步骤 2：选择注射部位</div>
-                                    <ul class="text-sm text-gray-700 space-y-1 ml-4">
-                                        <li>• <strong>腹部：</strong>肚脐周围至少5cm（2英寸）外</li>
-                                        <li>• <strong>大腿：</strong>大腿前侧上部</li>
-                                        <li>• <strong>上臂：</strong>上臂外侧后部（需他人协助）</li>
-                                        <li>• 每次轮换部位，同一部位间隔4周</li>
-                                    </ul>
-                                </div>
-                                
-                                <div class="bg-white p-4 rounded-lg">
-                                    <div class="font-bold text-purple-700 mb-2">步骤 3：消毒</div>
-                                    <ul class="text-sm text-gray-700 space-y-1 ml-4">
-                                        <li>• 用酒精棉片擦拭注射部位</li>
-                                        <li>• 待酒精完全挥发（约10秒）</li>
-                                        <li>• 不要再次触摸消毒区域</li>
-                                    </ul>
-                                </div>
-                                
-                                <div class="bg-white p-4 rounded-lg">
-                                    <div class="font-bold text-purple-700 mb-2">步骤 4：注射</div>
-                                    <ul class="text-sm text-gray-700 space-y-1 ml-4">
-                                        <li>• 轻轻捏起皮肤形成褶皱</li>
-                                        <li>• 将针头以90度角快速插入</li>
-                                        <li>• 按下注射按钮，保持10秒</li>
-                                        <li>• 听到咔哒声且计数器显示"0"</li>
-                                        <li>• 拔出针头，松开皮肤</li>
-                                    </ul>
-                                </div>
-                                
-                                <div class="bg-white p-4 rounded-lg">
-                                    <div class="font-bold text-purple-700 mb-2">步骤 5：善后</div>
-                                    <ul class="text-sm text-gray-700 space-y-1 ml-4">
-                                        <li>• 轻压注射部位（不要揉搓）</li>
-                                        <li>• 将用过的针头/注射笔放入锐器盒</li>
-                                        <li>• 不要重复使用针头或注射笔</li>
-                                        <li>• 记录注射时间和部位</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- 常见副作用 -->
-                        <div class="border-l-4 border-orange-500 bg-orange-50 p-6 rounded-r-xl">
-                            <h3 class="text-lg font-bold text-gray-800 mb-3">⚠️ 常见副作用</h3>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div>
-                                    <div class="font-semibold text-gray-800 mb-2">轻微反应（常见）：</div>
-                                    <ul class="text-sm text-gray-700 space-y-1">
-                                        <li>• 恶心、呕吐</li>
-                                        <li>• 腹泻或便秘</li>
-                                        <li>• 食欲下降</li>
-                                        <li>• 腹痛、腹胀</li>
-                                        <li>• 注射部位轻微红肿</li>
-                                    </ul>
-                                </div>
-                                
-                                <div class="bg-red-50 border border-red-200 rounded-lg p-4">
-                                    <div class="font-semibold text-red-700 mb-2">⚠️ 需立即就医：</div>
-                                    <ul class="text-sm text-red-700 space-y-1">
-                                        <li>• 严重腹痛（可能是胰腺炎）</li>
-                                        <li>• 颈部肿块、声音嘶哑</li>
-                                        <li>• 吞咽困难、呼吸困难</li>
-                                        <li>• 严重过敏反应（皮疹、肿胀）</li>
-                                        <li>• 持续呕吐导致脱水</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- 漏针处理 -->
-                        <div class="border-l-4 border-yellow-500 bg-yellow-50 p-6 rounded-r-xl">
-                            <h3 class="text-lg font-bold text-gray-800 mb-3">⏰ 漏针处理</h3>
-                            <div class="space-y-3 text-gray-700">
-                                <div class="bg-white p-4 rounded-lg">
-                                    <div class="font-semibold mb-1">✅ 4天内发现漏针：</div>
-                                    <p class="text-sm">尽快补打，然后按新的时间继续每周注射</p>
-                                </div>
-                                
-                                <div class="bg-white p-4 rounded-lg">
-                                    <div class="font-semibold mb-1">⚠️ 超过4天：</div>
-                                    <p class="text-sm">跳过本次，等待下一个预定注射日，重新开始周期</p>
-                                </div>
-                                
-                                <div class="bg-white p-4 rounded-lg">
-                                    <div class="font-semibold mb-1">❌ 不要：</div>
-                                    <p class="text-sm">3天内注射两次，否则可能增加副作用</p>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- 注意事项 -->
-                        <div class="border-l-4 border-red-500 bg-red-50 p-6 rounded-r-xl">
-                            <h3 class="text-lg font-bold text-gray-800 mb-3">🚫 禁忌和注意</h3>
-                            <ul class="space-y-2 text-gray-700">
-                                <li class="flex items-start gap-2">
-                                    <span class="text-red-500 font-bold">✗</span>
-                                    <span>有甲状腺髓样癌个人或家族史者禁用</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-red-500 font-bold">✗</span>
-                                    <span>有多发性内分泌腺瘤综合征2型（MEN 2）者禁用</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-red-500 font-bold">✗</span>
-                                    <span>对tirzepatide或任何成分过敏者禁用</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-yellow-500 font-bold">⚠</span>
-                                    <span>孕妇和哺乳期妇女使用前请咨询医生</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-yellow-500 font-bold">⚠</span>
-                                    <span>如有胰腺炎、肾病、视网膜病变史，请告知医生</span>
-                                </li>
-                            </ul>
-                        </div>
-                        
-                        <!-- 锐器处理 -->
-                        <div class="border-l-4 border-gray-500 bg-gray-50 p-6 rounded-r-xl">
-                            <h3 class="text-lg font-bold text-gray-800 mb-3">🗑️ 锐器安全处理</h3>
-                            <ul class="space-y-2 text-gray-700">
-                                <li class="flex items-start gap-2">
-                                    <span class="text-blue-500 font-bold">✓</span>
-                                    <span>使用FDA认证的锐器处理盒</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-blue-500 font-bold">✓</span>
-                                    <span>或使用坚固的塑料容器（如洗涤剂瓶）</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-red-500 font-bold">✗</span>
-                                    <span>不要直接扔进垃圾桶或回收箱</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-red-500 font-bold">✗</span>
-                                    <span>不要与他人共用针头或注射笔</span>
-                                </li>
-                                <li class="flex items-start gap-2">
-                                    <span class="text-blue-500 font-bold">✓</span>
-                                    <span>按当地规定处理医疗废物</span>
-                                </li>
-                            </ul>
-                        </div>
-                        
-                        <!-- 联系方式 -->
-                        <div class="bg-gradient-to-r from-blue-500 to-green-500 text-white p-6 rounded-xl">
-                            <h3 class="text-lg font-bold mb-3">📞 需要帮助？</h3>
-                            <div class="space-y-2 text-sm">
-                                <p>• 如有用药疑问，请咨询您的医生或药剂师</p>
-                                <p>• 礼来客服热线：1-800-Lilly-Rx (1-800-545-5979)</p>
-                                <p>• 如遇紧急情况，请立即就医或拨打急救电话</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            document.getElementById('app').innerHTML = html;
-        };
-
-        window.showSiteRotation = function() {
-            const sites = [
-                { id: 'abdomen', name: '腹部', icon: '🟢' },
-                { id: 'thigh', name: '大腿', icon: '🔵' },
-                { id: 'upperArm', name: '上臂', icon: '🟡' }
-            ];
-            
-            const html = `
-                <div class="bg-white rounded-2xl shadow-xl p-8">
-                    <div class="flex items-center justify-between mb-6">
-                        <h2 class="text-2xl font-bold text-gray-800">注射部位轮换</h2>
-                        <button onclick="render()" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">
-                            返回
-                        </button>
-                    </div>
-                    
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-                        ${sites.map(site => {
-                            const available = isSiteAvailable(site.id);
-                            const siteHistory = appState.injectionSites[site.id];
-                            const lastUsed = siteHistory.length > 0 ? siteHistory[siteHistory.length - 1] : null;
-                            const daysSince = lastUsed ? getDaysSince(lastUsed) : null;
-                            const usageCount = siteHistory.length;
-                            
-                            return `
-                                <div class="border-2 ${available ? 'border-green-300 bg-green-50' : 'border-yellow-300 bg-yellow-50'} rounded-xl p-6">
-                                    <div class="text-6xl mb-3 text-center">${site.icon}</div>
-                                    <div class="text-xl font-bold text-gray-800 text-center mb-2">${site.name}</div>
-                                    
-                                    <div class="space-y-2 text-sm">
-                                        <div class="flex items-center justify-between">
-                                            <span class="text-gray-600">状态：</span>
-                                            <span class="font-semibold ${available ? 'text-green-600' : 'text-yellow-600'}">
-                                                ${available ? '✓ 可用' : '⚠️ 建议等待'}
-                                            </span>
-                                        </div>
-                                        
-                                        <div class="flex items-center justify-between">
-                                            <span class="text-gray-600">使用次数：</span>
-                                            <span class="font-semibold text-gray-800">${usageCount} 次</span>
-                                        </div>
-                                        
-                                        ${lastUsed ? `
-                                            <div class="flex items-center justify-between">
-                                                <span class="text-gray-600">上次使用：</span>
-                                                <span class="font-semibold text-gray-800">${daysSince} 天前</span>
-                                            </div>
-                                            
-                                            ${!available ? `
-                                                <div class="mt-3 p-2 bg-yellow-100 rounded text-xs text-yellow-800">
-                                                    还需等待 ${28 - daysSince} 天
-                                                </div>
-                                            ` : ''}
-                                        ` : `
-                                            <div class="mt-3 p-2 bg-green-100 rounded text-xs text-green-800">
-                                                从未使用过
-                                            </div>
-                                        `}
-                                    </div>
-                                </div>
-                            `;
-                        }).join('')}
-                    </div>
-                    
-                    <div class="bg-blue-50 border border-blue-200 rounded-xl p-6">
-                        <h3 class="font-bold text-gray-800 mb-3 flex items-center gap-2">
-                            <span class="text-xl">💡</span>
-                            <span>轮换建议</span>
-                        </h3>
-                        <ul class="space-y-2 text-sm text-gray-700">
-                            <li class="flex items-start gap-2">
-                                <span class="text-blue-500 font-bold">•</span>
-                                <span>每次注射应更换不同部位</span>
-                            </li>
-                            <li class="flex items-start gap-2">
-                                <span class="text-blue-500 font-bold">•</span>
-                                <span>同一部位间隔至少 <strong>4周（28天）</strong></span>
-                            </li>
-                            <li class="flex items-start gap-2">
-                                <span class="text-blue-500 font-bold">•</span>
-                                <span>避免在有瘢痕、瘀伤或皮肤破损的区域注射</span>
-                            </li>
-                            <li class="flex items-start gap-2">
-                                <span class="text-blue-500 font-bold">•</span>
-                                <span>腹部注射时远离肚脐至少2英寸（5厘米）</span>
-                            </li>
-                        </ul>
-                    </div>
-                </div>
-            `;
-            document.getElementById('app').innerHTML = html;
-        };
-
-        window.showHistory = function() {
-            const history = appState.injectionHistory.slice().reverse();
-            const html = `
-                <div class="bg-white rounded-2xl shadow-xl p-8">
-                    <div class="flex items-center justify-between mb-6">
-                        <h2 class="text-2xl font-bold text-gray-800">注射历史</h2>
-                        <button onclick="render()" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">
-                            返回
-                        </button>
-                    </div>
-                    
-                    <div class="space-y-4">
-                        ${history.length === 0 ? `
-                            <div class="text-center py-12 text-gray-500">
-                                <div class="text-6xl mb-4">📊</div>
-                                <p>暂无注射记录</p>
-                            </div>
-                        ` : history.map(inj => `
-                            <div class="border border-gray-200 rounded-lg p-4">
-                                <div class="flex items-start justify-between">
-                                    <div>
-                                        <div class="font-semibold text-gray-800">
-                                            ${formatDate(inj.date)} - ${inj.dose} mg (第${inj.doseNumber}/4针)
-                                        </div>
-                                        <div class="text-sm text-gray-600 mt-1">
-                                            注射部位：${inj.site === 'abdomen' ? '腹部' : inj.site === 'thigh' ? '大腿' : '上臂'}
-                                        </div>
-                                        ${inj.sideEffects && inj.sideEffects.length > 0 ? `
-                                            <div class="text-sm text-orange-600 mt-1">
-                                                副作用：${inj.sideEffects.join(', ')}
-                                            </div>
-                                        ` : ''}
-                                        ${inj.notes ? `
-                                            <div class="text-sm text-gray-600 mt-1">
-                                                备注：${inj.notes}
-                                            </div>
-                                        ` : ''}
-                                    </div>
-                                </div>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-            `;
-            document.getElementById('app').innerHTML = html;
-        };
-
-        // 渲染
-        function render() {
-            const app = document.getElementById('app');
-            
-            if (!appState.initialized) {
-                app.innerHTML = InitSetup();
-            } else {
-                app.innerHTML = MainDashboard();
-            }
-        }
-
-        // 初始化
-        document.addEventListener('DOMContentLoaded', function() {
-            render();
-            
-            // 每小时检查一次提醒
-            setInterval(checkReminders, 60 * 60 * 1000);
-            checkReminders();
+            setInterval(evaluateReminders, 60 * 60 * 1000);
         });
     </script>
 </body>
