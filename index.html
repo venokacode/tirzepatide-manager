@@ -53,7 +53,7 @@
         let appState = Storage.load('tirzepatide_data') || {
             initialized: false,
             currentDose: null,
-            doseCount: 0, // 当前剂量已打次数 (0-4)
+            doseCount: 1, // 当前轮次即将注射的针次 (1-4)
             injectionDay: null, // 每周注射日 (0-6)
             lastInjection: null,
             nextInjection: null,
@@ -67,8 +67,46 @@
             notifications: {
                 browser: true,
                 email: false
-            }
+            },
+            pendingCycleReview: false
         };
+
+        if (!appState.notifications) {
+            appState.notifications = {
+                browser: true,
+                email: false
+            };
+        } else {
+            appState.notifications.browser = appState.notifications.browser !== false;
+            if (typeof appState.notifications.email === 'undefined') {
+                appState.notifications.email = false;
+            }
+        }
+
+        if (!Array.isArray(appState.injectionHistory)) {
+            appState.injectionHistory = [];
+        }
+
+        const lastInjectionRecord = appState.injectionHistory.length > 0
+            ? appState.injectionHistory[appState.injectionHistory.length - 1]
+            : null;
+        const lastDoseNumber = lastInjectionRecord && typeof lastInjectionRecord.doseNumber === 'number'
+            ? lastInjectionRecord.doseNumber
+            : null;
+
+        if (typeof appState.pendingCycleReview === 'undefined') {
+            appState.pendingCycleReview = lastDoseNumber === 4;
+        }
+
+        if (!appState.doseCount || appState.doseCount < 1 || appState.doseCount > 4) {
+            if (lastDoseNumber !== null) {
+                appState.doseCount = lastDoseNumber === 4
+                    ? 1
+                    : Math.min(lastDoseNumber + 1, 4);
+            } else {
+                appState.doseCount = 1;
+            }
+        }
 
         // 保存状态
         function saveState() {
@@ -89,9 +127,19 @@
         }
 
         function calculateNextInjection(lastDate, weekday) {
+            if (!lastDate) return '';
+
             const last = new Date(lastDate);
+            if (isNaN(last)) return '';
+
+            const normalizedWeekday = typeof weekday === 'number' ? weekday : parseInt(weekday, 10);
+            const targetWeekday = Number.isNaN(normalizedWeekday) ? last.getDay() : normalizedWeekday;
             const next = new Date(last);
-            next.setDate(next.getDate() + 7);
+
+            do {
+                next.setDate(next.getDate() + 1);
+            } while (next.getDay() !== targetWeekday);
+
             return next.toISOString();
         }
 
@@ -123,7 +171,8 @@
         // 检查是否需要提醒
         function checkReminders() {
             if (!appState.initialized || !appState.nextInjection) return;
-            
+            if (!appState.notifications || !appState.notifications.browser) return;
+
             const now = new Date();
             const next = new Date(appState.nextInjection);
             const hoursUntil = (next - now) / (1000 * 60 * 60);
@@ -298,9 +347,9 @@
             const isMissed = daysSince > 4 && daysSince <= 11;
             const shouldSkip = daysSince > 11;
             
-            const doseProgress = appState.doseCount;
-            const needsPurchase = doseProgress === 4;
-            const needsDoseChange = doseProgress === 0 && appState.injectionHistory.length > 0;
+            const doseProgress = appState.pendingCycleReview ? 4 : appState.doseCount;
+            const needsPurchase = !!appState.pendingCycleReview;
+            const needsDoseChange = !!appState.pendingCycleReview;
             
             return `
                 <div class="space-y-6">
@@ -650,6 +699,7 @@
             appState.injectionDay = weekday;
             appState.lastInjection = date;
             appState.nextInjection = calculateNextInjection(date, weekday);
+            appState.pendingCycleReview = false;
             
             saveState();
             requestNotificationPermission();
@@ -672,6 +722,7 @@
             appState.injectionDay = weekday;
             appState.lastInjection = lastDate;
             appState.nextInjection = calculateNextInjection(lastDate, weekday);
+            appState.pendingCycleReview = false;
             
             saveState();
             requestNotificationPermission();
@@ -702,19 +753,23 @@
             const notes = document.getElementById('notes').value;
             
             // 记录注射
+            const currentDoseNumber = appState.doseCount && appState.doseCount >= 1 ? appState.doseCount : 1;
+
             const injection = {
                 date: time,
                 dose: appState.currentDose,
                 site: site.value,
                 sideEffects,
                 notes,
-                doseNumber: appState.doseCount
+                doseNumber: currentDoseNumber
             };
-            
+
             appState.injectionHistory.push(injection);
             appState.lastInjection = time;
             appState.nextInjection = calculateNextInjection(time, appState.injectionDay);
-            appState.doseCount = appState.doseCount === 4 ? 0 : appState.doseCount + 1;
+            const completedCycle = currentDoseNumber === 4;
+            appState.pendingCycleReview = completedCycle;
+            appState.doseCount = completedCycle ? 1 : Math.min(currentDoseNumber + 1, 4);
             
             // 记录注射部位使用时间
             appState.injectionSites[site.value].push(time);
@@ -728,8 +783,16 @@
         window.skipAndReschedule = function() {
             const newDate = prompt('请输入新的注射日期 (YYYY-MM-DD)：');
             if (newDate) {
-                appState.lastInjection = newDate;
-                appState.nextInjection = calculateNextInjection(newDate, appState.injectionDay);
+                const parsedDate = new Date(newDate);
+                if (isNaN(parsedDate)) {
+                    alert('请输入有效的日期');
+                    return;
+                }
+
+                const isoDate = parsedDate.toISOString();
+                appState.lastInjection = isoDate;
+                appState.injectionDay = parsedDate.getDay();
+                appState.nextInjection = calculateNextInjection(isoDate, appState.injectionDay);
                 saveState();
             }
         };
@@ -739,12 +802,14 @@
             if (newDose && ['2.5', '5', '7.5', '10', '12.5', '15'].includes(newDose)) {
                 appState.currentDose = newDose;
                 appState.doseCount = 1;
+                appState.pendingCycleReview = false;
                 saveState();
             }
         };
 
         window.keepDose = function() {
             appState.doseCount = 1;
+            appState.pendingCycleReview = false;
             saveState();
         };
 
